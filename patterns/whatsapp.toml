@@ -1,0 +1,5 @@
+[pattern]
+name = "whatsapp"
+description = "WhatsApp images - date encoded in filename, no time info"
+regex = "IMG-(?P<year>\\d{4})(?P<month>\\d{2})(?P<day>\\d{2})-WA(?P<sequence>\\d+)"
+extensions = [".jpg", ".jpeg"]

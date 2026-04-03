@@ -1,0 +1,5 @@
+[pattern]
+name = "screenshot"
+description = "Various screenshot formats (including German and underscore variations)"
+regex = "(?:Screenshot|Bildschirmfoto)[_ ](?P<year>\\d{4})(?P<month>\\d{2})(?P<day>\\d{2})[_ ](?P<hour>\\d{2})[.-]?(?P<minute>\\d{2})[.-]?(?P<second>\\d{2})"
+extensions = [".png", ".jpg", ".jpeg", ".webp"]
