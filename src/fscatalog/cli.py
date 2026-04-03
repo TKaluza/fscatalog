@@ -106,7 +106,10 @@ def _fmt_optional(value: str | None) -> str:
 
 def _print_disk_info(indent: str, disk) -> None:
     """Print disk metadata in a readable multi-line block."""
-    print(f"{indent}disk: '{_fmt_optional(disk.label)}', '{_fmt_optional(disk.device)}', '{_fmt_optional(disk.model)} ")
+    print(
+        f"{indent}disk: '{_fmt_optional(disk.label)}', '{_fmt_optional(disk.device)}', '{_fmt_optional(disk.model)} "
+    )
+
 
 # ── scan ──────────────────────────────────────────────────────────────
 
