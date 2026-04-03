@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +37,19 @@ class DiskInfo:
     fstype: str | None = None
 
 
+@dataclass(slots=True)
+class ScanStats:
+    """Counters collected while running a scan."""
+
+    fd_candidates: int = 0
+    files_seen: int = 0
+    files_inserted: int = 0
+    stat_failures: int = 0
+    hash_failures: int = 0
+    insert_batches: int = 0
+    insert_failures: int = 0
+
+
 @dataclass(frozen=True, slots=True)
 class ScanMeta:
     """Metadata for a single scan run."""
@@ -49,6 +62,7 @@ class ScanMeta:
     library_version: str
     follow_symlinks: bool
     patterns: tuple[FilePattern, ...] = ()
+    stats: ScanStats = field(default_factory=ScanStats)
 
 
 @dataclass(frozen=True, slots=True)

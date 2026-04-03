@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import errno
 import logging
 import os
 import subprocess
@@ -66,6 +67,7 @@ def scan_files(
     one_file_system: bool = True,
     on_fd_start: Callable[[], None] | None = None,
     on_fd_done: Callable[[int], None] | None = None,
+    on_stat_failure: Callable[[str, Exception], None] | None = None,
 ) -> Iterator[RawFileInfo]:
     """Discover files under *root* using ``fd`` and yield :class:`RawFileInfo`.
 
@@ -108,10 +110,17 @@ def scan_files(
             stderr=subprocess.PIPE,
             check=True,
         )
-    except Exception:
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode(errors="replace").strip() if exc.stderr else ""
+        log.error(
+            "fd failed for %s with exit code %s%s",
+            root,
+            exc.returncode,
+            f": {stderr}" if stderr else "",
+        )
         if on_fd_done:
             on_fd_done(0)
-        raise
+        raise RuntimeError(f"fd failed while scanning {root}") from exc
     fd_elapsed = time.perf_counter() - fd_start
 
     if completed.stderr:
@@ -162,7 +171,15 @@ def scan_files(
                 )
             except (FileNotFoundError, PermissionError, OSError) as exc:
                 stat_failures += 1
-                log.debug("stat failed for %s: %s", rel, exc)
+                if on_stat_failure:
+                    on_stat_failure(rel.decode(errors="surrogateescape"), exc)
+                level = logging.DEBUG
+                if isinstance(exc, OSError) and getattr(exc, "errno", None) not in {
+                    errno.ENOENT,
+                    errno.EACCES,
+                }:
+                    level = logging.WARNING
+                log.log(level, "stat failed for %s: %s", rel, exc)
     finally:
         log.debug(
             "scan_files root=%s step=fd_run elapsed=%.3fs candidates=%d yielded=%d stat_failures=%d stat_time=%.3fs",

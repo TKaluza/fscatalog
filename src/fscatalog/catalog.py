@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import getpass
+import errno
 import json
 import logging
 import re
@@ -14,14 +15,16 @@ from pathlib import Path
 from fscatalog._version import __version__
 from fscatalog.diskinfo import collect_disk_info
 from fscatalog.hasher import hash_file
-from fscatalog.models import FileEntry, FilePattern, ScanMeta
+from fscatalog.models import FileEntry, FilePattern, ScanMeta, ScanStats
 from fscatalog.scanner import scan_files
 from fscatalog.storage import CatalogDB
 
 log = logging.getLogger(__name__)
 
 
-def _log_timing(step: str, start: float, *, scan_id: str | None = None, **details: object) -> None:
+def _log_timing(
+    step: str, start: float, *, scan_id: str | None = None, **details: object
+) -> None:
     """Emit a debug log line with a measured duration."""
     elapsed = time.perf_counter() - start
     parts = [f"step={step}", f"elapsed={elapsed:.3f}s"]
@@ -100,6 +103,10 @@ def run_scan(
     """
     root = Path(root).resolve()
     patterns = patterns or []
+    stats = ScanStats()
+
+    def _record_stat_failure(_path: str, _exc: Exception) -> None:
+        stats.stat_failures += 1
 
     # Pre-compile regexes
     regex_start = time.perf_counter()
@@ -126,6 +133,7 @@ def run_scan(
         library_version=__version__,
         follow_symlinks=follow_symlinks,
         patterns=tuple(patterns),
+        stats=stats,
     )
     _log_timing(
         "build_scan_meta",
@@ -146,6 +154,11 @@ def run_scan(
     entry_time = 0.0
     batch_count = 0
 
+    def _record_fd_done(candidates: int) -> None:
+        stats.fd_candidates = candidates
+        if on_fd_done:
+            on_fd_done(candidates)
+
     scan_start = time.perf_counter()
     for raw in scan_files(
         root,
@@ -153,8 +166,10 @@ def run_scan(
         follow_symlinks=follow_symlinks,
         one_file_system=one_file_system,
         on_fd_start=on_fd_start,
-        on_fd_done=on_fd_done,
+        on_fd_done=_record_fd_done,
+        on_stat_failure=_record_stat_failure,
     ):
+        stats.files_seen += 1
         # Pattern matching
         pname, pgroups = (None, None)
         if patterns:
@@ -171,8 +186,24 @@ def run_scan(
                 hash_start = time.perf_counter()
                 xxh = hash_file(raw.absolute_path)
                 hash_time += time.perf_counter() - hash_start
-            except (PermissionError, OSError) as exc:
+            except FileNotFoundError as exc:
+                stats.hash_failures += 1
                 log.debug("hash failed for %s: %s", raw.absolute_path, exc)
+                xxh = "ERROR"
+            except PermissionError as exc:
+                stats.hash_failures += 1
+                log.debug("hash failed for %s: %s", raw.absolute_path, exc)
+                xxh = "ERROR"
+            except OSError as exc:
+                stats.hash_failures += 1
+                if getattr(exc, "errno", None) in {
+                    errno.EIO,
+                    errno.ESTALE,
+                    errno.ENXIO,
+                }:
+                    log.warning("hash failed for %s: %s", raw.absolute_path, exc)
+                else:
+                    log.debug("hash failed for %s: %s", raw.absolute_path, exc)
                 xxh = "ERROR"
 
         entry_start = time.perf_counter()
@@ -192,26 +223,54 @@ def run_scan(
         entry_time += time.perf_counter() - entry_start
         batch.append(entry)
         total_inserted += 1
+        stats.files_inserted += 1
         if progress_callback:
             progress_callback(total_inserted)
 
         if len(batch) >= batch_size:
             insert_start = time.perf_counter()
-            db.insert_files(batch)
+            try:
+                db.insert_files(batch)
+            except Exception:
+                stats.insert_failures += 1
+                log.exception(
+                    "scan_id=%s failed to insert batch of %d files after %d inserted",
+                    scan_id,
+                    len(batch),
+                    total_inserted,
+                )
+                raise
             insert_time += time.perf_counter() - insert_start
             batch_count += 1
+            stats.insert_batches += 1
             batch.clear()
 
     # Flush remaining
     if batch:
         insert_start = time.perf_counter()
-        db.insert_files(batch)
+        try:
+            db.insert_files(batch)
+        except Exception:
+            stats.insert_failures += 1
+            log.exception(
+                "scan_id=%s failed to insert final batch of %d files after %d inserted",
+                scan_id,
+                len(batch),
+                total_inserted,
+            )
+            raise
         insert_time += time.perf_counter() - insert_start
         batch_count += 1
+        stats.insert_batches += 1
 
     scan_elapsed = time.perf_counter() - scan_start
+    failure_summary = (
+        f"stat_failures={stats.stat_failures} "
+        f"hash_failures={stats.hash_failures} "
+        f"insert_failures={stats.insert_failures}"
+    )
     log.debug(
-        "scan_id=%s step=process_files elapsed=%.3fs files=%d batches=%d pattern_time=%.3fs hash_time=%.3fs entry_time=%.3fs",
+        "scan_id=%s step=process_files elapsed=%.3fs files=%d batches=%d pattern_time=%.3fs hash_time=%.3fs entry_time=%.3fs %s",
         scan_id,
         scan_elapsed,
         total_inserted,
@@ -219,13 +278,24 @@ def run_scan(
         pattern_time,
         hash_time,
         entry_time,
+        failure_summary,
     )
     log.debug(
-        "scan_id=%s step=insert_batches elapsed=%.3fs batches=%d files=%d",
+        "scan_id=%s step=insert_batches elapsed=%.3fs batches=%d files=%d %s",
         scan_id,
         insert_time,
         batch_count,
         total_inserted,
+        failure_summary,
     )
-    log.info("Scan %s complete: %d files catalogued", scan_id, total_inserted)
+    end_level = logging.INFO
+    if stats.stat_failures or stats.hash_failures or stats.insert_failures:
+        end_level = logging.WARNING
+    log.log(
+        end_level,
+        "Scan %s complete: %d files catalogued (%s)",
+        scan_id,
+        total_inserted,
+        failure_summary,
+    )
     return meta

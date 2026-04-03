@@ -144,6 +144,18 @@ def cmd_scan(args: argparse.Namespace) -> None:
         f"  disk:     uuid={meta.disk.uuid}  model={meta.disk.model}  serial={meta.disk.serial}"
     )
     print(f"  db:       {db_path}")
+    if (
+        meta.stats.stat_failures
+        or meta.stats.hash_failures
+        or meta.stats.insert_failures
+    ):
+        print(
+            "  warnings: "
+            f"fd_candidates={meta.stats.fd_candidates} "
+            f"stat_failures={meta.stats.stat_failures} "
+            f"hash_failures={meta.stats.hash_failures} "
+            f"insert_failures={meta.stats.insert_failures}"
+        )
 
 
 # ── info ──────────────────────────────────────────────────────────────
