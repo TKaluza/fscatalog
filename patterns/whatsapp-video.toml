@@ -1,0 +1,5 @@
+[pattern]
+name = "whatsapp-video"
+description = "WhatsApp videos"
+regex = "VID-(?P<year>\\d{4})(?P<month>\\d{2})(?P<day>\\d{2})-WA(?P<sequence>\\d+)"
+extensions = [".mp4", ".3gp"]

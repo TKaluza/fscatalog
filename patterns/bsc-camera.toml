@@ -1,0 +1,5 @@
+[pattern]
+name = "bsc-camera"
+description = "BSC camera files with sequence numbers"
+regex = "_?BSC(?P<device_id>\\d+)(?:-(?P<variant>\\d+))?"
+extensions = [".jpg", ".jpeg", ".cr2", ".cr3"]
