@@ -142,99 +142,123 @@ def run_scan(
         pattern_count=len(patterns),
     )
 
+    txn_start = time.perf_counter()
+    db.begin()
+    _log_timing("begin_transaction", txn_start, scan_id=scan_id)
+
     insert_scan_start = time.perf_counter()
-    db.insert_scan(meta)
-    _log_timing("insert_scan_meta", insert_scan_start, scan_id=scan_id)
+    try:
+        db.insert_scan(meta)
+        _log_timing("insert_scan_meta", insert_scan_start, scan_id=scan_id)
 
-    batch: list[FileEntry] = []
-    total_inserted = 0
-    insert_time = 0.0
-    hash_time = 0.0
-    pattern_time = 0.0
-    entry_time = 0.0
-    batch_count = 0
+        batch: list[FileEntry] = []
+        total_inserted = 0
+        insert_time = 0.0
+        hash_time = 0.0
+        pattern_time = 0.0
+        entry_time = 0.0
+        batch_count = 0
 
-    def _record_fd_done(candidates: int) -> None:
-        stats.fd_candidates = candidates
-        if on_fd_done:
-            on_fd_done(candidates)
+        def _record_fd_done(candidates: int) -> None:
+            stats.fd_candidates = candidates
+            if on_fd_done:
+                on_fd_done(candidates)
 
-    scan_start = time.perf_counter()
-    for raw in scan_files(
-        root,
-        extensions,
-        follow_symlinks=follow_symlinks,
-        one_file_system=one_file_system,
-        on_fd_start=on_fd_start,
-        on_fd_done=_record_fd_done,
-        on_stat_failure=_record_stat_failure,
-    ):
-        stats.files_seen += 1
-        # Pattern matching
-        pname, pgroups = (None, None)
-        if patterns:
-            pattern_start = time.perf_counter()
-            pname, pgroups = _match_patterns(raw.filename, patterns, compiled)
-            pattern_time += time.perf_counter() - pattern_start
-            # If patterns are given but none matched, still catalogue the file
-            # (it matched by extension via fd).
+        scan_start = time.perf_counter()
+        for raw in scan_files(
+            root,
+            extensions,
+            follow_symlinks=follow_symlinks,
+            one_file_system=one_file_system,
+            on_fd_start=on_fd_start,
+            on_fd_done=_record_fd_done,
+            on_stat_failure=_record_stat_failure,
+        ):
+            stats.files_seen += 1
+            # Pattern matching
+            pname, pgroups = (None, None)
+            if patterns:
+                pattern_start = time.perf_counter()
+                pname, pgroups = _match_patterns(raw.filename, patterns, compiled)
+                pattern_time += time.perf_counter() - pattern_start
+                # If patterns are given but none matched, still catalogue the file
+                # (it matched by extension via fd).
 
-        # Hashing
-        xxh = ""
-        if not skip_hash:
-            try:
-                hash_start = time.perf_counter()
-                xxh = hash_file(raw.absolute_path)
-                hash_time += time.perf_counter() - hash_start
-            except FileNotFoundError as exc:
-                stats.hash_failures += 1
-                log.debug("hash failed for %s: %s", raw.absolute_path, exc)
-                xxh = "ERROR"
-            except PermissionError as exc:
-                stats.hash_failures += 1
-                log.debug("hash failed for %s: %s", raw.absolute_path, exc)
-                xxh = "ERROR"
-            except OSError as exc:
-                stats.hash_failures += 1
-                if getattr(exc, "errno", None) in {
-                    errno.EIO,
-                    errno.ESTALE,
-                    errno.ENXIO,
-                }:
-                    log.warning("hash failed for %s: %s", raw.absolute_path, exc)
-                else:
+            # Hashing
+            xxh = ""
+            if not skip_hash:
+                try:
+                    hash_start = time.perf_counter()
+                    xxh = hash_file(raw.absolute_path)
+                    hash_time += time.perf_counter() - hash_start
+                except FileNotFoundError as exc:
+                    stats.hash_failures += 1
                     log.debug("hash failed for %s: %s", raw.absolute_path, exc)
-                xxh = "ERROR"
+                    xxh = "ERROR"
+                except PermissionError as exc:
+                    stats.hash_failures += 1
+                    log.debug("hash failed for %s: %s", raw.absolute_path, exc)
+                    xxh = "ERROR"
+                except OSError as exc:
+                    stats.hash_failures += 1
+                    if getattr(exc, "errno", None) in {
+                        errno.EIO,
+                        errno.ESTALE,
+                        errno.ENXIO,
+                    }:
+                        log.warning("hash failed for %s: %s", raw.absolute_path, exc)
+                    else:
+                        log.debug("hash failed for %s: %s", raw.absolute_path, exc)
+                    xxh = "ERROR"
 
-        entry_start = time.perf_counter()
-        entry = FileEntry(
-            scan_id=scan_id,
-            absolute_path=raw.absolute_path,
-            filename=raw.filename,
-            extension=raw.extension,
-            xxhash=xxh,
-            size_bytes=raw.size_bytes,
-            mtime_epoch=raw.mtime_epoch,
-            ctime_epoch=raw.ctime_epoch,
-            is_symlink=raw.is_symlink,
-            pattern_name=pname,
-            pattern_groups=pgroups,
-        )
-        entry_time += time.perf_counter() - entry_start
-        batch.append(entry)
-        total_inserted += 1
-        stats.files_inserted += 1
-        if progress_callback:
-            progress_callback(total_inserted)
+            entry_start = time.perf_counter()
+            entry = FileEntry(
+                scan_id=scan_id,
+                absolute_path=raw.absolute_path,
+                filename=raw.filename,
+                extension=raw.extension,
+                xxhash=xxh,
+                size_bytes=raw.size_bytes,
+                mtime_epoch=raw.mtime_epoch,
+                ctime_epoch=raw.ctime_epoch,
+                is_symlink=raw.is_symlink,
+                pattern_name=pname,
+                pattern_groups=pgroups,
+            )
+            entry_time += time.perf_counter() - entry_start
+            batch.append(entry)
+            total_inserted += 1
+            stats.files_inserted += 1
+            if progress_callback:
+                progress_callback(total_inserted)
 
-        if len(batch) >= batch_size:
+            if len(batch) >= batch_size:
+                insert_start = time.perf_counter()
+                try:
+                    db.insert_files(batch)
+                except Exception:
+                    stats.insert_failures += 1
+                    log.exception(
+                        "scan_id=%s failed to insert batch of %d files after %d inserted",
+                        scan_id,
+                        len(batch),
+                        total_inserted,
+                    )
+                    raise
+                insert_time += time.perf_counter() - insert_start
+                batch_count += 1
+                stats.insert_batches += 1
+                batch.clear()
+
+        # Flush remaining
+        if batch:
             insert_start = time.perf_counter()
             try:
                 db.insert_files(batch)
             except Exception:
                 stats.insert_failures += 1
                 log.exception(
-                    "scan_id=%s failed to insert batch of %d files after %d inserted",
+                    "scan_id=%s failed to insert final batch of %d files after %d inserted",
                     scan_id,
                     len(batch),
                     total_inserted,
@@ -243,25 +267,18 @@ def run_scan(
             insert_time += time.perf_counter() - insert_start
             batch_count += 1
             stats.insert_batches += 1
-            batch.clear()
-
-    # Flush remaining
-    if batch:
-        insert_start = time.perf_counter()
-        try:
-            db.insert_files(batch)
-        except Exception:
-            stats.insert_failures += 1
-            log.exception(
-                "scan_id=%s failed to insert final batch of %d files after %d inserted",
-                scan_id,
-                len(batch),
-                total_inserted,
-            )
-            raise
-        insert_time += time.perf_counter() - insert_start
-        batch_count += 1
-        stats.insert_batches += 1
+        commit_start = time.perf_counter()
+        db.commit()
+        _log_timing(
+            "commit_transaction",
+            commit_start,
+            scan_id=scan_id,
+            files=total_inserted,
+            batches=batch_count,
+        )
+    except Exception:
+        db.rollback()
+        raise
 
     scan_elapsed = time.perf_counter() - scan_start
     failure_summary = (

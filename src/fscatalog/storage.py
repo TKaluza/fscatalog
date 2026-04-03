@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -65,6 +66,7 @@ class CatalogDB:
     def __init__(self, db_path: str | Path = "catalog.duckdb") -> None:
         self._path = str(db_path)
         self._con = duckdb.connect(self._path)
+        self._in_transaction = False
         self._con.execute("BEGIN")
         self._con.execute(_SCHEMA_SQL)
         self._con.execute("COMMIT")
@@ -74,6 +76,27 @@ class CatalogDB:
     # ------------------------------------------------------------------
     # Write
     # ------------------------------------------------------------------
+
+    def begin(self) -> None:
+        """Begin an explicit write transaction."""
+        if self._in_transaction:
+            raise RuntimeError("transaction already active")
+        self._con.execute("BEGIN")
+        self._in_transaction = True
+
+    def commit(self) -> None:
+        """Commit the active write transaction."""
+        if not self._in_transaction:
+            return
+        self._con.execute("COMMIT")
+        self._in_transaction = False
+
+    def rollback(self) -> None:
+        """Roll back the active write transaction."""
+        if not self._in_transaction:
+            return
+        self._con.execute("ROLLBACK")
+        self._in_transaction = False
 
     def insert_scan(self, meta: ScanMeta) -> None:
         """Insert scan metadata."""
@@ -282,10 +305,19 @@ class CatalogDB:
             return
         sql = "FORCE CHECKPOINT" if force else "CHECKPOINT"
         log.debug("checkpointing database at %s with %s", self._path, sql)
+        start = time.perf_counter()
         self._con.execute(sql)
+        log.debug(
+            "checkpoint complete at %s with %s elapsed=%.3fs",
+            self._path,
+            sql,
+            time.perf_counter() - start,
+        )
 
     def close(self, *, checkpoint: bool = True) -> None:
         try:
+            if self._in_transaction:
+                self.rollback()
             if checkpoint:
                 self.checkpoint()
         finally:
