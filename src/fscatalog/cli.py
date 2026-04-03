@@ -99,6 +99,15 @@ def _make_progress():
         return _PlainProgress()
 
 
+def _fmt_optional(value: str | None) -> str:
+    """Render absent metadata consistently in CLI output."""
+    return value if value else "-"
+
+
+def _print_disk_info(indent: str, disk) -> None:
+    """Print disk metadata in a readable multi-line block."""
+    print(f"{indent}disk: '{_fmt_optional(disk.label)}', '{_fmt_optional(disk.device)}', '{_fmt_optional(disk.model)} ")
+
 # ── scan ──────────────────────────────────────────────────────────────
 
 
@@ -140,9 +149,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
     print(f"\nScan complete in {elapsed:.1f}s")
     print(f"  scan_id:  {meta.scan_id}")
     print(f"  root:     {meta.root_path}")
-    print(
-        f"  disk:     uuid={meta.disk.uuid}  model={meta.disk.model}  serial={meta.disk.serial}"
-    )
+    _print_disk_info("  ", meta.disk)
     print(f"  db:       {db_path}")
     if (
         meta.stats.stat_failures
@@ -172,9 +179,7 @@ def cmd_info(args: argparse.Namespace) -> None:
             ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(s.scan_epoch))
             count = db.file_count(scan_id=s.scan_id)
             print(f"[{s.scan_id}]  {ts}  {s.root_path}  ({count} files)")
-            print(
-                f"    disk: uuid={s.disk.uuid}  model={s.disk.model}  serial={s.disk.serial}"
-            )
+            _print_disk_info("    ", s.disk)
             if s.patterns:
                 names = ", ".join(p.name for p in s.patterns)
                 print(f"    patterns: {names}")

@@ -68,6 +68,8 @@ class CatalogDB:
         self._con.execute("BEGIN")
         self._con.execute(_SCHEMA_SQL)
         self._con.execute("COMMIT")
+        if self._path != ":memory:":
+            self._con.execute("PRAGMA enable_checkpoint_on_shutdown")
 
     # ------------------------------------------------------------------
     # Write
@@ -274,11 +276,24 @@ class CatalogDB:
         """Run arbitrary SQL for advanced queries."""
         return self._con.execute(sql, params or [])
 
-    def close(self) -> None:
-        self._con.close()
+    def checkpoint(self, *, force: bool = True) -> None:
+        """Flush the WAL into the main database file."""
+        if self._path == ":memory:":
+            return
+        sql = "FORCE CHECKPOINT" if force else "CHECKPOINT"
+        log.debug("checkpointing database at %s with %s", self._path, sql)
+        self._con.execute(sql)
+
+    def close(self, *, checkpoint: bool = True) -> None:
+        try:
+            if checkpoint:
+                self.checkpoint()
+        finally:
+            self._con.close()
 
     def __enter__(self) -> CatalogDB:
         return self
 
     def __exit__(self, *exc) -> None:
-        self.close()
+        checkpoint = not exc or exc[0] is None
+        self.close(checkpoint=checkpoint)

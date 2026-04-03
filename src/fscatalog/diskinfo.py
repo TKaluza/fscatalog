@@ -35,8 +35,8 @@ def _lsblk_json(device: str) -> dict | None:
         result = subprocess.run(
             [
                 "lsblk",
-                "-Jno",
-                "UUID,MODEL,SERIAL,LABEL,FSTYPE",
+                "-Jpo",
+                "PATH,TYPE,PKNAME,UUID,PARTUUID,MODEL,SERIAL,LABEL,PARTLABEL,FSTYPE",
                 device,
             ],
             capture_output=True,
@@ -50,6 +50,24 @@ def _lsblk_json(device: str) -> dict | None:
     except (subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError):
         log.debug("lsblk failed for %s", device)
     return None
+
+
+def _clean(value: object) -> str | None:
+    """Normalize lsblk string values."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _parent_device_path(info: dict) -> str | None:
+    """Return the parent block-device path if lsblk exposed one."""
+    pkname = _clean(info.get("pkname"))
+    if pkname is None:
+        return None
+    if pkname.startswith("/dev/"):
+        return pkname
+    return f"/dev/{pkname}"
 
 
 def collect_disk_info(path: str | Path) -> DiskInfo:
@@ -66,11 +84,24 @@ def collect_disk_info(path: str | Path) -> DiskInfo:
     if info is None:
         return DiskInfo(device=device)
 
+    parent_info: dict | None = None
+    parent_device = _parent_device_path(info)
+    if parent_device is not None and parent_device != device:
+        parent_info = _lsblk_json(parent_device)
+
+    model = _clean(info.get("model")) or (
+        _clean(parent_info.get("model")) if parent_info else None
+    )
+    serial = _clean(info.get("serial")) or (
+        _clean(parent_info.get("serial")) if parent_info else None
+    )
+    label = _clean(info.get("label")) or _clean(info.get("partlabel"))
+
     return DiskInfo(
-        uuid=info.get("uuid") or None,
-        model=(info.get("model") or "").strip() or None,
-        serial=(info.get("serial") or "").strip() or None,
+        uuid=_clean(info.get("uuid")) or _clean(info.get("partuuid")),
+        model=model,
+        serial=serial,
         device=device,
-        label=info.get("label") or None,
-        fstype=info.get("fstype") or None,
+        label=label,
+        fstype=_clean(info.get("fstype")),
     )
