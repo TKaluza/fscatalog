@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import itertools
 import logging
+import threading
 import sys
 import time
 from pathlib import Path
@@ -15,28 +17,86 @@ from fscatalog.patterns import load_pattern, load_patterns_from_dir
 from fscatalog.storage import CatalogDB
 
 
-def _make_progress_callback():
-    """Return a progress callback.  Uses tqdm if available, else simple print."""
-    try:
+class _PlainProgress:
+    """Fallback progress output when tqdm is unavailable."""
+
+    def __init__(self) -> None:
+        self._last = 0
+        self._total = None
+
+    def on_fd_start(self) -> None:
+        print("Scanning with fd...", end="", flush=True)
+
+    def on_fd_done(self, total: int) -> None:
+        self._total = total
+        print(f"\rHashing {total} files...", end="", flush=True)
+
+    def on_file(self, n: int) -> None:
+        if n - self._last >= 1000 or n < self._last:
+            total = f"/{self._total}" if self._total is not None else ""
+            print(f"\r  {n}{total} files processed", end="", flush=True)
+            self._last = n
+
+    def close(self) -> None:
+        print()
+
+
+class _TqdmProgress:
+    """Spinner plus tqdm progress bar for CLI scans."""
+
+    def __init__(self) -> None:
         from tqdm import tqdm  # type: ignore[import-untyped]
 
-        pbar = tqdm(unit=" files", desc="Cataloguing")
+        self._tqdm = tqdm
+        self._spinner_stop = threading.Event()
+        self._spinner_thread: threading.Thread | None = None
+        self._bar = None
 
-        def _cb(n: int) -> None:
-            pbar.n = n
-            pbar.refresh()
+    def _spinner(self, message: str) -> None:
+        frames = itertools.cycle("|/-\\")
+        while not self._spinner_stop.wait(0.1):
+            sys.stderr.write(f"\r{message} {next(frames)}")
+            sys.stderr.flush()
 
-        _cb._pbar = pbar  # prevent GC  # type: ignore[attr-defined]
-        return _cb
+    def on_fd_start(self) -> None:
+        self._spinner_stop.clear()
+        self._spinner_thread = threading.Thread(
+            target=self._spinner,
+            args=("Scanning with fd...",),
+            daemon=True,
+        )
+        self._spinner_thread.start()
+
+    def on_fd_done(self, total: int) -> None:
+        self._spinner_stop.set()
+        if self._spinner_thread is not None:
+            self._spinner_thread.join()
+            self._spinner_thread = None
+        sys.stderr.write("\r" + " " * 40 + "\r")
+        sys.stderr.flush()
+        self._bar = self._tqdm(total=total, unit=" files", desc="Hashing")
+
+    def on_file(self, n: int) -> None:
+        if self._bar is not None:
+            delta = n - self._bar.n
+            if delta > 0:
+                self._bar.update(delta)
+
+    def close(self) -> None:
+        self._spinner_stop.set()
+        if self._spinner_thread is not None:
+            self._spinner_thread.join()
+            self._spinner_thread = None
+        if self._bar is not None:
+            self._bar.close()
+
+
+def _make_progress():
+    """Return a CLI progress helper."""
+    try:
+        return _TqdmProgress()
     except ImportError:
-        _last = [0]
-
-        def _cb(n: int) -> None:
-            if n - _last[0] >= 1000 or n < _last[0]:
-                print(f"\r  {n} files catalogued", end="", flush=True)
-                _last[0] = n
-
-        return _cb
+        return _PlainProgress()
 
 
 # ── scan ──────────────────────────────────────────────────────────────
@@ -58,25 +118,24 @@ def cmd_scan(args: argparse.Namespace) -> None:
             patterns.append(load_pattern(p))
 
     db_path = args.db or "catalog.duckdb"
-    cb = _make_progress_callback()
+    progress = _make_progress()
 
     t0 = time.perf_counter()
-    with CatalogDB(db_path) as db:
-        meta = run_scan(
-            root,
-            db,
-            patterns=patterns,
-            follow_symlinks=args.follow_symlinks,
-            skip_hash=args.no_hash,
-            progress_callback=cb,
-        )
+    try:
+        with CatalogDB(db_path) as db:
+            meta = run_scan(
+                root,
+                db,
+                patterns=patterns,
+                follow_symlinks=args.follow_symlinks,
+                skip_hash=args.no_hash,
+                progress_callback=progress.on_file,
+                on_fd_start=progress.on_fd_start,
+                on_fd_done=progress.on_fd_done,
+            )
+    finally:
+        progress.close()
     elapsed = time.perf_counter() - t0
-
-    # Close tqdm if present
-    if hasattr(cb, "_pbar"):
-        cb._pbar.close()  # type: ignore[attr-defined]
-    else:
-        print()  # newline after \r progress
 
     print(f"\nScan complete in {elapsed:.1f}s")
     print(f"  scan_id:  {meta.scan_id}")

@@ -60,6 +60,11 @@ fscatalog query "SELECT extension, count(*), sum(size_bytes) FROM files GROUP BY
 fscatalog -vv scan /home/tim
 ```
 
+`-vv` enables debug logs with phase timings for pattern compilation, disk-info
+collection, file discovery, hashing, and database inserts. If installed with
+the `cli` extra, the scan command shows a spinner during `fd` discovery and a
+tqdm bar for file processing.
+
 ## Library Usage
 
 ```python

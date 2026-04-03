@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import logging
 import os
 import subprocess
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,6 +64,8 @@ def scan_files(
     *,
     follow_symlinks: bool = False,
     one_file_system: bool = True,
+    on_fd_start: Callable[[], None] | None = None,
+    on_fd_done: Callable[[int], None] | None = None,
 ) -> Iterator[RawFileInfo]:
     """Discover files under *root* using ``fd`` and yield :class:`RawFileInfo`.
 
@@ -94,45 +98,78 @@ def scan_files(
     )
 
     log.debug("Running: %s", " ".join(cmd))
-    completed = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=True,
-    )
+    if on_fd_start:
+        on_fd_start()
+    fd_start = time.perf_counter()
+    try:
+        completed = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+    except Exception:
+        if on_fd_done:
+            on_fd_done(0)
+        raise
+    fd_elapsed = time.perf_counter() - fd_start
 
     if completed.stderr:
         for line in completed.stderr.decode(errors="replace").splitlines():
             log.warning("fd stderr: %s", line)
 
-    for rel in completed.stdout.split(b"\0"):
-        if not rel:
-            continue
-        try:
-            rel_str = rel.decode(errors="surrogateescape")
-            full_path = root / rel_str
-            abs_str = str(full_path)
+    rel_paths = [rel for rel in completed.stdout.split(b"\0") if rel]
+    candidates = len(rel_paths)
+    if on_fd_done:
+        on_fd_done(candidates)
 
-            # Detect symlink before potentially resolving
-            is_symlink = full_path.is_symlink()
+    scanned = 0
+    yielded = 0
+    stat_failures = 0
+    stat_elapsed = 0.0
+    try:
+        for rel in rel_paths:
+            scanned += 1
+            try:
+                stat_start = time.perf_counter()
+                rel_str = rel.decode(errors="surrogateescape")
+                full_path = root / rel_str
+                abs_str = str(full_path)
 
-            # Use stat (follows symlinks) or lstat (does not)
-            if follow_symlinks:
-                st = os.stat(abs_str)
-            else:
-                st = os.lstat(abs_str)
+                # Detect symlink before potentially resolving
+                is_symlink = full_path.is_symlink()
 
-            name = full_path.name
-            _, ext = os.path.splitext(name)
+                # Use stat (follows symlinks) or lstat (does not)
+                if follow_symlinks:
+                    st = os.stat(abs_str)
+                else:
+                    st = os.lstat(abs_str)
 
-            yield RawFileInfo(
-                absolute_path=abs_str,
-                filename=name,
-                extension=ext.lower(),
-                size_bytes=st.st_size,
-                mtime_epoch=st.st_mtime,
-                ctime_epoch=st.st_ctime,
-                is_symlink=is_symlink,
-            )
-        except (FileNotFoundError, PermissionError, OSError) as exc:
-            log.debug("stat failed for %s: %s", rel, exc)
+                stat_elapsed += time.perf_counter() - stat_start
+
+                name = full_path.name
+                _, ext = os.path.splitext(name)
+
+                yielded += 1
+                yield RawFileInfo(
+                    absolute_path=abs_str,
+                    filename=name,
+                    extension=ext.lower(),
+                    size_bytes=st.st_size,
+                    mtime_epoch=st.st_mtime,
+                    ctime_epoch=st.st_ctime,
+                    is_symlink=is_symlink,
+                )
+            except (FileNotFoundError, PermissionError, OSError) as exc:
+                stat_failures += 1
+                log.debug("stat failed for %s: %s", rel, exc)
+    finally:
+        log.debug(
+            "scan_files root=%s step=fd_run elapsed=%.3fs candidates=%d yielded=%d stat_failures=%d stat_time=%.3fs",
+            root,
+            fd_elapsed,
+            scanned,
+            yielded,
+            stat_failures,
+            stat_elapsed,
+        )
