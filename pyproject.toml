@@ -1,15 +1,16 @@
 [project]
 name = "fscatalog"
-version = "0.1.1b1"
+version = "0.2.0b1"
 description = "Fast file cataloging with fd, xxhash and DuckDB"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "Tim Kaluza" }]
 
 dependencies = [
     "xxhash>=3.5",
     "duckdb>=1.2",
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]

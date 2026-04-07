@@ -8,7 +8,7 @@ DuckDB database for instant querying, deduplication, and change detection.
 
 ## Requirements
 
-- Python ≥ 3.13
+- Python ≥ 3.10
 - [fd](https://github.com/sharkdp/fd) installed and on `PATH`
 - [uv](https://docs.astral.sh/uv/) for project management
 
@@ -107,6 +107,53 @@ with CatalogDB("my_catalog.duckdb") as db:
     for row in result.fetchall():
         print(row)
 ```
+
+Typical post-scan deduplication workflow:
+
+```python
+from __future__ import annotations
+
+from pathlib import Path
+
+from fscatalog import CatalogDB, run_scan
+
+
+def iter_duplicates_to_delete(
+    db: CatalogDB,
+    *,
+    scan_id: str,
+):
+    """Yield (duplicate, keeper) for duplicate files.
+
+    Strategy:
+    - group by content hash (`find_duplicates`)
+    - sort each group by oldest mtime first
+    - keep the oldest file
+    - delete the rest
+    """
+    for group in db.find_duplicates(scan_id=scan_id, min_size=1):
+        # Oldest file wins. Add `absolute_path` as a stable tie-breaker.
+        ordered = sorted(group.files, key=lambda f: (f.mtime_epoch, f.absolute_path))
+        keeper = ordered[0]
+
+        for duplicate in ordered[1:]:
+            yield Path(duplicate.absolute_path), Path(keeper.absolute_path)
+
+
+with CatalogDB("my_catalog.duckdb") as db:
+    meta = run_scan("/srv/photos", db)
+
+    for duplicate, keeper in iter_duplicates_to_delete(
+        db,
+        scan_id=meta.scan_id,
+    ):
+        print(f"KEEP {keeper}")
+        print(f"DELETE {duplicate}")
+        duplicate.unlink()
+```
+
+If you want a safer first pass, remove `duplicate.unlink()` and keep the `print(...)`.
+If you prefer creation time sorting, replace `mtime_epoch` with `ctime_epoch`.
 
 ## Pattern TOML Format
 
